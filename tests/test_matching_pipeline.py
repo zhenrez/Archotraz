@@ -77,6 +77,7 @@ class MatchingPipelineTest(unittest.TestCase):
 
         repaired = self.warden.intake_local(repo, request_id="crashy-intake")
         self.assertTrue(repaired["guard"]["passed"])
+        self.assertEqual(repaired["guard"]["guard"], "static_intake_integrity_v2")
         self.assertEqual(
             {item["type"] for item in repaired["evidence"]},
             {"source_inventory", "languages", "manifests", "tests", "readme", "license"},
