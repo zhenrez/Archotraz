@@ -22,6 +22,7 @@ EXPECTED_INTAKE_EVIDENCE = {
     "readme",
     "license",
 }
+STATIC_INTAKE_GUARD = "static_intake_integrity_v2"
 
 
 class Warden:
@@ -55,7 +56,11 @@ class Warden:
             evidence_records = self._ensure_intake_evidence(
                 source, candidate_id, subject["state"]["snapshot_manifest_artifact"]
             )
-            guards = self.ledger.list_guard_results(candidate_id)
+            guards = [
+                item
+                for item in self.ledger.list_guard_results(candidate_id)
+                if item["guard"] == STATIC_INTAKE_GUARD
+            ]
             guard = guards[-1] if guards else self.run_static_intake_guard(candidate_id)
             return {
                 "candidate": subject,
@@ -364,13 +369,13 @@ class Warden:
         }
         guard_result_id = self.ledger.record_guard(
             subject_id=candidate_id,
-            guard_name="static_intake_integrity_v1",
+            guard_name=STATIC_INTAKE_GUARD,
             passed=passed,
             detail=detail,
         )
         return {
             "guard_result_id": guard_result_id,
-            "guard": "static_intake_integrity_v1",
+            "guard": STATIC_INTAKE_GUARD,
             "passed": passed,
             "detail": detail,
         }
