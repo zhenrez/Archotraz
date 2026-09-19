@@ -7,7 +7,7 @@ from typing import Any
 
 from .artifacts import ArtifactStore
 from .detective import build_snapshot_manifest, inspect_repository
-from .ledger import Ledger
+from .ledger import IdempotencyConflict, Ledger
 
 
 class Warden:
@@ -27,6 +27,19 @@ class Warden:
         artifact_digest = self.artifacts.put_bytes(artifact_bytes)
 
         candidate_id = f"candidate:{manifest['tree_sha256'][:20]}"
+        idempotency_key = f"intake:{request_id}"
+        existing_subject = self.ledger.get_idempotency_subject(idempotency_key)
+        if existing_subject is not None:
+            if existing_subject != candidate_id:
+                raise IdempotencyConflict(idempotency_key)
+            guards = self.ledger.list_guard_results(candidate_id)
+            guard = guards[-1] if guards else self.run_static_intake_guard(candidate_id)
+            return {
+                "candidate": self.ledger.get_subject(candidate_id),
+                "evidence": self.ledger.list_evidence(candidate_id),
+                "guard": guard,
+            }
+
         state = {
             "source": {"kind": "local", "path": str(source)},
             "snapshot_digest": manifest["tree_sha256"],
@@ -45,7 +58,7 @@ class Warden:
             event_type="candidate.intake.registered",
             new_state=state,
             actor="warden",
-            idempotency_key=f"intake:{request_id}",
+            idempotency_key=idempotency_key,
             expected_version=0,
             payload={"request_id": request_id},
             provenance={"snapshot_manifest_artifact": artifact_digest},
