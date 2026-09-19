@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from archotraz.artifacts import ArtifactStore
@@ -58,6 +59,66 @@ class MatchingPipelineTest(unittest.TestCase):
             repeated["candidate"]["version"], processed["candidate"]["version"]
         )
         self.assertEqual(repeated["cell"]["subject_id"], cell["subject_id"])
+
+    def test_intake_retry_repairs_partial_evidence_without_false_completion(self) -> None:
+        repo = self.make_repo("crashy", "crashy.py")
+        original = self.ledger.record_evidence
+        calls = {"count": 0}
+
+        def flaky_record_evidence(**kwargs):
+            calls["count"] += 1
+            if calls["count"] == 3:
+                raise RuntimeError("simulated crash after partial evidence")
+            return original(**kwargs)
+
+        with patch.object(self.ledger, "record_evidence", side_effect=flaky_record_evidence):
+            with self.assertRaises(RuntimeError):
+                self.warden.intake_local(repo, request_id="crashy-intake")
+
+        repaired = self.warden.intake_local(repo, request_id="crashy-intake")
+        self.assertTrue(repaired["guard"]["passed"])
+        self.assertEqual(
+            {item["type"] for item in repaired["evidence"]},
+            {"source_inventory", "languages", "manifests", "tests", "readme", "license"},
+        )
+        self.assertEqual(len(repaired["evidence"]), 6)
+
+        fresh_request = self.warden.intake_local(
+            repo, request_id="crashy-intake-fresh"
+        )
+        self.assertEqual(
+            fresh_request["candidate"]["subject_id"],
+            repaired["candidate"]["subject_id"],
+        )
+        self.assertEqual(len(fresh_request["evidence"]), 6)
+
+    def test_process_retry_repairs_missing_cell_after_partial_commit(self) -> None:
+        repo = self.make_repo("cellcrash", "cellcrash.py")
+        intake = self.warden.intake_local(repo, request_id="cellcrash-intake")
+        candidate_id = intake["candidate"]["subject_id"]
+        original = self.ledger.append_transition
+
+        def flaky_append_transition(**kwargs):
+            if kwargs.get("event_type") == "cell.assignment.recorded":
+                raise RuntimeError("simulated crash before cell commit")
+            return original(**kwargs)
+
+        with patch.object(
+            self.ledger, "append_transition", side_effect=flaky_append_transition
+        ):
+            with self.assertRaises(RuntimeError):
+                self.warden.process_candidate(
+                    candidate_id, request_id="cellcrash-process"
+                )
+
+        repaired = self.warden.process_candidate(
+            candidate_id, request_id="cellcrash-process"
+        )
+        self.assertEqual(
+            repaired["candidate"]["state"]["processor_status"], "normalized"
+        )
+        self.assertEqual(repaired["cell"]["state"]["candidate_id"], candidate_id)
+        self.assertEqual(repaired["cell"]["state"]["block"], "GEN-POP")
 
     def test_exhaustive_pair_run_reconciles_universe_and_kitchen_is_unvalidated(self) -> None:
         alpha = self.make_repo("alpha", "alpha.py")
