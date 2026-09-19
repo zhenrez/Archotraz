@@ -1,0 +1,34 @@
+{
+  "policy_id": "historical-2026-09-13",
+  "status": "historical_reference_not_automatic_authority",
+  "automatic_scoring": false,
+  "automatic_cell_assignment": false,
+  "repo_keep_score": {
+    "formula": "30P + 15F + 20L + 20C + 15U",
+    "normalized_range": [0, 1],
+    "weights": {
+      "power_accuracy_comprehensiveness": 30,
+      "speed_efficiency": 15,
+      "lightweight_low_debt": 20,
+      "extensible_compatible": 20,
+      "unique_irreplicable": 15
+    }
+  },
+  "harvestability": {
+    "formula": "40M + 30V_feature + 15I_speed + 15I_independence",
+    "weights": {
+      "mimicability": 40,
+      "feature_value": 30,
+      "implementation_speed": 15,
+      "independence": 15
+    }
+  },
+  "cell_descriptions": {
+    "A": "light / fast / extensible",
+    "B": "balanced",
+    "C": "huge capability / expensive",
+    "GEN_POP": "ordinary viable repos",
+    "AD_SEG": "unusual / high-risk / high-upside"
+  },
+  "activation_note": "Historical policy recovered from the design transcript. Retained for provenance; it does not score or assign candidates automatically."
+}
