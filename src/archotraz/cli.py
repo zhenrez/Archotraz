@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .artifacts import ArtifactStore
+from .bindings import binding_status
 from .ledger import Ledger
 from .warden import Warden
 
@@ -20,6 +21,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     intake.add_argument("path")
     intake.add_argument("--request-id")
+    sub.add_parser(
+        "bindings", help="show recovered runtime, sandbox, and cell-policy bindings"
+    )
     show = sub.add_parser("show", help="show a candidate state and evidence")
     show.add_argument("candidate_id")
     return parser
@@ -34,6 +38,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "intake-local":
         result = warden.intake_local(args.path, request_id=args.request_id)
+    elif args.command == "bindings":
+        result = binding_status()
     else:
         result = {
             "candidate": ledger.get_subject(args.candidate_id),
