@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 from pathlib import Path
 
@@ -56,6 +57,30 @@ class OperationalLoopTest(unittest.TestCase):
         self.assertEqual(
             again["guard"]["guard_result_id"], result["guard"]["guard_result_id"]
         )
+
+    def test_state_directory_is_excluded_from_snapshot_identity(self) -> None:
+        nested_state = self.repo / ".archotraz"
+        nested_ledger = Ledger(nested_state / "archotraz.sqlite3")
+        nested_artifacts = ArtifactStore(nested_state / "artifacts")
+        nested_warden = Warden(nested_ledger, nested_artifacts)
+
+        first = nested_warden.intake_local(self.repo, request_id="state-exclusion-1")
+        first_id = first["candidate"]["subject_id"]
+
+        (nested_state / "noise.txt").write_text("should never affect source identity\n", encoding="utf-8")
+        second = nested_warden.intake_local(self.repo, request_id="state-exclusion-2")
+
+        self.assertEqual(second["candidate"]["subject_id"], first_id)
+        manifest_digest = second["candidate"]["state"]["snapshot_manifest_artifact"]
+        manifest = nested_artifacts.get_bytes(manifest_digest).decode()
+        self.assertNotIn(".archotraz", manifest)
+
+    def test_concurrent_identical_artifact_writes_converge(self) -> None:
+        payload = b"same immutable artifact"
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            digests = list(pool.map(self.artifacts.put_bytes, [payload] * 8))
+        self.assertEqual(len(set(digests)), 1)
+        self.artifacts.verify(digests[0])
 
     def test_recovered_bindings_remain_fail_closed(self) -> None:
         status = binding_status()
