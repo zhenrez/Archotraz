@@ -168,6 +168,14 @@ class Ledger:
                 "updated_at": timestamp,
             }
 
+    def get_idempotency_subject(self, idempotency_key: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT subject_id FROM events WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+        return row["subject_id"] if row else None
+
     def record_evidence(
         self,
         *,
@@ -215,6 +223,22 @@ class Ledger:
                 ),
             )
         return guard_result_id
+
+    def list_guard_results(self, subject_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM guard_results WHERE subject_id=? ORDER BY recorded_at",
+                (subject_id,),
+            ).fetchall()
+        return [
+            {
+                "guard_result_id": row["guard_result_id"],
+                "guard": row["guard_name"],
+                "passed": bool(row["passed"]),
+                "detail": json.loads(row["detail_json"]),
+            }
+            for row in rows
+        ]
 
     def get_subject(
         self, subject_id: str, *, conn: sqlite3.Connection | None = None
