@@ -51,6 +51,10 @@ class OperationalLoopTest(unittest.TestCase):
             again["candidate"]["subject_id"], candidate["subject_id"]
         )
         self.assertEqual(again["candidate"]["version"], 1)
+        self.assertEqual(len(again["evidence"]), len(result["evidence"]))
+        self.assertEqual(
+            again["guard"]["guard_result_id"], result["guard"]["guard_result_id"]
+        )
 
     def test_transition_rejects_stale_expected_version(self) -> None:
         result = self.warden.intake_local(self.repo, request_id="req-002")
