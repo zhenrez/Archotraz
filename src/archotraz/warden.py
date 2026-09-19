@@ -14,6 +14,16 @@ from .matcher import enumerate_pairs
 from .processor import normalize_profile
 
 
+EXPECTED_INTAKE_EVIDENCE = {
+    "source_inventory",
+    "languages",
+    "manifests",
+    "tests",
+    "readme",
+    "license",
+}
+
+
 class Warden:
     """Coordinates bounded deterministic work; workers do not self-promote."""
 
@@ -33,14 +43,23 @@ class Warden:
         candidate_id = f"candidate:{manifest['tree_sha256'][:20]}"
         idempotency_key = f"intake:{request_id}"
         existing_subject = self.ledger.get_idempotency_subject(idempotency_key)
-        if existing_subject is not None:
-            if existing_subject != candidate_id:
-                raise IdempotencyConflict(idempotency_key)
+        if existing_subject is not None and existing_subject != candidate_id:
+            raise IdempotencyConflict(idempotency_key)
+
+        try:
+            subject = self.ledger.get_subject(candidate_id)
+        except KeyError:
+            subject = None
+
+        if subject is not None:
+            evidence_records = self._ensure_intake_evidence(
+                source, candidate_id, subject["state"]["snapshot_manifest_artifact"]
+            )
             guards = self.ledger.list_guard_results(candidate_id)
             guard = guards[-1] if guards else self.run_static_intake_guard(candidate_id)
             return {
-                "candidate": self.ledger.get_subject(candidate_id),
-                "evidence": self.ledger.list_evidence(candidate_id),
+                "candidate": subject,
+                "evidence": evidence_records,
                 "guard": guard,
             }
 
@@ -68,19 +87,62 @@ class Warden:
             provenance={"snapshot_manifest_artifact": artifact_digest},
         )
 
-        evidence_records = []
+        evidence_records = self._ensure_intake_evidence(
+            source, candidate_id, artifact_digest
+        )
+        guard = self.run_static_intake_guard(candidate_id)
+        return {"candidate": subject, "evidence": evidence_records, "guard": guard}
+
+    def _ensure_intake_evidence(
+        self, source: Path, candidate_id: str, artifact_digest: str
+    ) -> list[dict[str, Any]]:
+        existing = self.ledger.list_evidence(candidate_id)
+        existing_types = {item["type"] for item in existing}
         for item in inspect_repository(source):
-            evidence_id = self.ledger.record_evidence(
+            if item["type"] in existing_types:
+                continue
+            self.ledger.record_evidence(
                 subject_id=candidate_id,
                 evidence_type=item["type"],
                 result_state=item["result_state"],
                 detail=item["detail"],
                 artifact_digest=artifact_digest,
             )
-            evidence_records.append({"evidence_id": evidence_id, **item})
+        return self.ledger.list_evidence(candidate_id)
 
-        guard = self.run_static_intake_guard(candidate_id)
-        return {"candidate": subject, "evidence": evidence_records, "guard": guard}
+    def _ensure_cell_record(
+        self,
+        *,
+        cell_id: str,
+        candidate_id: str,
+        candidate_version: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        try:
+            return self.ledger.get_subject(cell_id)
+        except KeyError:
+            pass
+
+        cell_state = {
+            "candidate_id": candidate_id,
+            "block": "GEN-POP",
+            "assignment_policy": "unresolved",
+            "assignment_reason": "numeric A/B/C policy not recovered",
+            "eligibility": "retained",
+            "stage": "processor",
+            "execution_authorized": False,
+        }
+        return self.ledger.append_transition(
+            subject_id=cell_id,
+            kind="cell_record",
+            event_type="cell.assignment.recorded",
+            new_state=cell_state,
+            actor="processor",
+            idempotency_key=f"{idempotency_key}:cell",
+            expected_version=0,
+            payload={"candidate_id": candidate_id},
+            provenance={"candidate_version": candidate_version},
+        )
 
     def process_candidate(
         self, candidate_id: str, *, request_id: str | None = None
@@ -92,21 +154,30 @@ class Warden:
         if existing_subject is not None:
             if existing_subject != candidate_id:
                 raise IdempotencyConflict(idempotency_key)
+            candidate = self.ledger.get_subject(candidate_id)
             return {
-                "candidate": self.ledger.get_subject(candidate_id),
-                "cell": self.ledger.get_subject(cell_id),
+                "candidate": candidate,
+                "cell": self._ensure_cell_record(
+                    cell_id=cell_id,
+                    candidate_id=candidate_id,
+                    candidate_version=candidate["version"],
+                    idempotency_key=idempotency_key,
+                ),
             }
 
         candidate = self.ledger.get_subject(candidate_id)
         evidence = self.ledger.list_evidence(candidate_id)
         profile = normalize_profile(evidence)
         if candidate["state"].get("profile") == profile:
-            try:
-                cell = self.ledger.get_subject(cell_id)
-            except KeyError:
-                cell = None
-            if cell is not None:
-                return {"candidate": candidate, "cell": cell}
+            return {
+                "candidate": candidate,
+                "cell": self._ensure_cell_record(
+                    cell_id=cell_id,
+                    candidate_id=candidate_id,
+                    candidate_version=candidate["version"],
+                    idempotency_key=idempotency_key,
+                ),
+            }
 
         new_state = dict(candidate["state"])
         new_state["profile"] = profile
@@ -131,25 +202,11 @@ class Warden:
             },
         )
 
-        cell_state = {
-            "candidate_id": candidate_id,
-            "block": "GEN-POP",
-            "assignment_policy": "unresolved",
-            "assignment_reason": "numeric A/B/C policy not recovered",
-            "eligibility": "retained",
-            "stage": "processor",
-            "execution_authorized": False,
-        }
-        cell = self.ledger.append_transition(
-            subject_id=cell_id,
-            kind="cell_record",
-            event_type="cell.assignment.recorded",
-            new_state=cell_state,
-            actor="processor",
-            idempotency_key=f"{idempotency_key}:cell",
-            expected_version=0,
-            payload={"candidate_id": candidate_id},
-            provenance={"candidate_version": processed["version"]},
+        cell = self._ensure_cell_record(
+            cell_id=cell_id,
+            candidate_id=candidate_id,
+            candidate_version=processed["version"],
+            idempotency_key=idempotency_key,
         )
         return {"candidate": processed, "cell": cell}
 
@@ -284,17 +341,22 @@ class Warden:
         bad_states = [
             e for e in evidence if e["result_state"] not in explicit_states
         ]
+        evidence_types = {e["type"] for e in evidence}
+        missing_required_types = sorted(EXPECTED_INTAKE_EVIDENCE - evidence_types)
         missing_provenance = [e for e in evidence if not e["artifact_digest"]]
         snapshot_ok = bool(subject["state"].get("snapshot_manifest_artifact"))
         execution_fail_closed = subject["state"].get("execution_allowed") is False
         passed = (
             not bad_states
+            and not missing_required_types
             and not missing_provenance
             and snapshot_ok
             and execution_fail_closed
         )
         detail = {
             "explicit_evidence_states": not bad_states,
+            "required_evidence_complete": not missing_required_types,
+            "missing_required_evidence": missing_required_types,
             "evidence_has_artifact_provenance": not missing_provenance,
             "snapshot_reference_present": snapshot_ok,
             "untrusted_execution_fail_closed": execution_fail_closed,
