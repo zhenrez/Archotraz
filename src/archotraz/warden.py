@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from pathlib import Path
@@ -7,7 +8,10 @@ from typing import Any
 
 from .artifacts import ArtifactStore
 from .detective import build_snapshot_manifest, inspect_repository
+from .kitchen import build_candidate_dossier
 from .ledger import IdempotencyConflict, Ledger
+from .matcher import enumerate_pairs
+from .processor import normalize_profile
 
 
 class Warden:
@@ -46,7 +50,7 @@ class Warden:
             "snapshot_manifest_artifact": artifact_digest,
             "snapshot_completeness": "file-hash-manifest",
             "cell": "GEN-POP",
-            "cell_reason": "A/B/C policy binding is intentionally unresolved",
+            "cell_reason": "numeric A/B/C assignment policy is unresolved",
             "disposition": "hold",
             "adoption_status": "research",
             "execution_allowed": False,
@@ -77,6 +81,192 @@ class Warden:
 
         guard = self.run_static_intake_guard(candidate_id)
         return {"candidate": subject, "evidence": evidence_records, "guard": guard}
+
+    def process_candidate(
+        self, candidate_id: str, *, request_id: str | None = None
+    ) -> dict[str, Any]:
+        request_id = request_id or str(uuid.uuid4())
+        idempotency_key = f"process:{request_id}"
+        existing_subject = self.ledger.get_idempotency_subject(idempotency_key)
+        cell_id = f"cell:{candidate_id.split(':', 1)[-1]}"
+        if existing_subject is not None:
+            if existing_subject != candidate_id:
+                raise IdempotencyConflict(idempotency_key)
+            return {
+                "candidate": self.ledger.get_subject(candidate_id),
+                "cell": self.ledger.get_subject(cell_id),
+            }
+
+        candidate = self.ledger.get_subject(candidate_id)
+        evidence = self.ledger.list_evidence(candidate_id)
+        profile = normalize_profile(evidence)
+        if candidate["state"].get("profile") == profile:
+            try:
+                cell = self.ledger.get_subject(cell_id)
+            except KeyError:
+                cell = None
+            if cell is not None:
+                return {"candidate": candidate, "cell": cell}
+
+        new_state = dict(candidate["state"])
+        new_state["profile"] = profile
+        new_state["processor_status"] = "normalized"
+        new_state["cell"] = "GEN-POP"
+        new_state["cell_reason"] = "numeric A/B/C assignment policy is unresolved"
+
+        processed = self.ledger.append_transition(
+            subject_id=candidate_id,
+            kind=candidate["kind"],
+            event_type="candidate.processor.normalized",
+            new_state=new_state,
+            actor="processor",
+            idempotency_key=idempotency_key,
+            expected_version=candidate["version"],
+            payload={"request_id": request_id, "profile_schema_version": 1},
+            provenance={
+                "evidence_refs": [item["evidence_id"] for item in evidence],
+                "snapshot_manifest_artifact": candidate["state"][
+                    "snapshot_manifest_artifact"
+                ],
+            },
+        )
+
+        cell_state = {
+            "candidate_id": candidate_id,
+            "block": "GEN-POP",
+            "assignment_policy": "unresolved",
+            "assignment_reason": "numeric A/B/C policy not recovered",
+            "eligibility": "retained",
+            "stage": "processor",
+            "execution_authorized": False,
+        }
+        cell = self.ledger.append_transition(
+            subject_id=cell_id,
+            kind="cell_record",
+            event_type="cell.assignment.recorded",
+            new_state=cell_state,
+            actor="processor",
+            idempotency_key=f"{idempotency_key}:cell",
+            expected_version=0,
+            payload={"candidate_id": candidate_id},
+            provenance={"candidate_version": processed["version"]},
+        )
+        return {"candidate": processed, "cell": cell}
+
+    def build_kitchen_candidates(
+        self, *, request_id: str | None = None
+    ) -> dict[str, Any]:
+        request_id = request_id or str(uuid.uuid4())
+        run_id = f"run:matching:{hashlib.sha256(request_id.encode()).hexdigest()[:20]}"
+        idempotency_key = f"matching:{request_id}"
+        existing_subject = self.ledger.get_idempotency_subject(idempotency_key)
+        if existing_subject is not None:
+            if existing_subject != run_id:
+                raise IdempotencyConflict(idempotency_key)
+            run = self.ledger.get_subject(run_id)
+            return {
+                "run": run,
+                "matches": [
+                    self.ledger.get_subject(subject_id)
+                    for subject_id in run["state"]["match_ids"]
+                ],
+                "kitchen": [
+                    self.ledger.get_subject(subject_id)
+                    for subject_id in run["state"]["kitchen_ids"]
+                ],
+            }
+
+        retained_candidates = [
+            item
+            for item in self.ledger.list_subjects(kind="repository_candidate")
+            if item["state"].get("disposition") != "exclude"
+        ]
+        candidates = [
+            item
+            for item in retained_candidates
+            if item["state"].get("profile") is not None
+        ]
+        pairs = enumerate_pairs(candidates)
+        match_subjects = []
+        kitchen_subjects = []
+
+        for pair in pairs:
+            try:
+                match = self.ledger.get_subject(pair["subject_id"])
+                if match["state"] != pair["state"]:
+                    raise RuntimeError(
+                        f"semantic collision for persisted match {pair['subject_id']}"
+                    )
+            except KeyError:
+                match = self.ledger.append_transition(
+                    subject_id=pair["subject_id"],
+                    kind=pair["kind"],
+                    event_type="match.proposed",
+                    new_state=pair["state"],
+                    actor="matcher",
+                    idempotency_key=f"match:{pair['subject_id']}",
+                    expected_version=0,
+                    payload={"originating_request_id": request_id},
+                    provenance={"member_versions": pair["state"]["member_versions"]},
+                )
+            match_subjects.append(match)
+
+            dossier_spec = build_candidate_dossier(match)
+            try:
+                dossier = self.ledger.get_subject(dossier_spec["subject_id"])
+                if dossier["state"] != dossier_spec["state"]:
+                    raise RuntimeError(
+                        f"semantic collision for Kitchen dossier {dossier_spec['subject_id']}"
+                    )
+            except KeyError:
+                dossier = self.ledger.append_transition(
+                    subject_id=dossier_spec["subject_id"],
+                    kind=dossier_spec["kind"],
+                    event_type="kitchen.candidate.proposed",
+                    new_state=dossier_spec["state"],
+                    actor="kitchen",
+                    idempotency_key=f"kitchen:{dossier_spec['subject_id']}",
+                    expected_version=0,
+                    payload={"originating_request_id": request_id},
+                    provenance={"match_id": match["subject_id"]},
+                )
+            kitchen_subjects.append(dossier)
+
+        declared = len(candidates) * (len(candidates) - 1) // 2
+        run_state = {
+            "method": "exhaustive_unordered_pair_v1",
+            "retained_count": len(retained_candidates),
+            "eligible_count": len(candidates),
+            "declared_pair_universe": declared,
+            "generated_count": len(match_subjects),
+            "excluded_count": 0,
+            "pending_count": len(retained_candidates) - len(candidates),
+            "match_ids": [item["subject_id"] for item in match_subjects],
+            "kitchen_ids": [item["subject_id"] for item in kitchen_subjects],
+            "reconciled": declared == len(match_subjects),
+            "scoring_policy": "none",
+            "model_calls": 0,
+        }
+        run = self.ledger.append_transition(
+            subject_id=run_id,
+            kind="matching_run",
+            event_type="matching.run.completed",
+            new_state=run_state,
+            actor="warden",
+            idempotency_key=idempotency_key,
+            expected_version=0,
+            payload={"request_id": request_id},
+            provenance={
+                "candidate_versions": {
+                    item["subject_id"]: item["version"] for item in candidates
+                }
+            },
+        )
+        return {
+            "run": run,
+            "matches": match_subjects,
+            "kitchen": kitchen_subjects,
+        }
 
     def run_static_intake_guard(self, candidate_id: str) -> dict[str, Any]:
         subject = self.ledger.get_subject(candidate_id)
