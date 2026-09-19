@@ -37,7 +37,8 @@ class Warden:
     ) -> dict[str, Any]:
         request_id = request_id or str(uuid.uuid4())
         source = Path(source_path).resolve()
-        manifest = build_snapshot_manifest(source)
+        exclusions = self._state_exclusions()
+        manifest = build_snapshot_manifest(source, exclude_paths=exclusions)
         artifact_bytes = json.dumps(manifest, sort_keys=True).encode()
         artifact_digest = self.artifacts.put_bytes(artifact_bytes)
 
@@ -98,12 +99,20 @@ class Warden:
         guard = self.run_static_intake_guard(candidate_id)
         return {"candidate": subject, "evidence": evidence_records, "guard": guard}
 
+    def _state_exclusions(self) -> tuple[Path, ...]:
+        return (
+            Path(self.ledger.path).resolve().parent,
+            self.artifacts.root.resolve(),
+        )
+
     def _ensure_intake_evidence(
         self, source: Path, candidate_id: str, artifact_digest: str
     ) -> list[dict[str, Any]]:
         existing = self.ledger.list_evidence(candidate_id)
         existing_types = {item["type"] for item in existing}
-        for item in inspect_repository(source):
+        for item in inspect_repository(
+            source, exclude_paths=self._state_exclusions()
+        ):
             if item["type"] in existing_types:
                 continue
             self.ledger.record_evidence(
