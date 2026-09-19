@@ -37,7 +37,7 @@ class Ledger:
         return conn
 
     def _initialize(self) -> None:
-        with self._connect() as conn:
+        with self.connection() as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS subjects (
@@ -81,6 +81,15 @@ class Ledger:
                 );
                 """
             )
+
+    @contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -169,7 +178,7 @@ class Ledger:
             }
 
     def get_idempotency_subject(self, idempotency_key: str) -> str | None:
-        with self._connect() as conn:
+        with self.connection() as conn:
             row = conn.execute(
                 "SELECT subject_id FROM events WHERE idempotency_key = ?",
                 (idempotency_key,),
@@ -186,7 +195,7 @@ class Ledger:
         artifact_digest: str | None = None,
     ) -> str:
         evidence_id = str(uuid.uuid4())
-        with self._connect() as conn:
+        with self.connection() as conn:
             conn.execute(
                 "INSERT INTO evidence VALUES(?,?,?,?,?,?,?)",
                 (
@@ -210,7 +219,7 @@ class Ledger:
         detail: dict[str, Any],
     ) -> str:
         guard_result_id = str(uuid.uuid4())
-        with self._connect() as conn:
+        with self.connection() as conn:
             conn.execute(
                 "INSERT INTO guard_results VALUES(?,?,?,?,?,?)",
                 (
@@ -225,7 +234,7 @@ class Ledger:
         return guard_result_id
 
     def list_guard_results(self, subject_id: str) -> list[dict[str, Any]]:
-        with self._connect() as conn:
+        with self.connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM guard_results WHERE subject_id=? ORDER BY recorded_at",
                 (subject_id,),
@@ -262,8 +271,28 @@ class Ledger:
             if owns:
                 conn.close()
 
+    def list_subjects(self, *, kind: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM subjects"
+        params: tuple[Any, ...] = ()
+        if kind is not None:
+            query += " WHERE kind = ?"
+            params = (kind,)
+        query += " ORDER BY subject_id"
+        with self.connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                "subject_id": row["subject_id"],
+                "kind": row["kind"],
+                "version": row["version"],
+                "state": json.loads(row["state_json"]),
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
     def list_evidence(self, subject_id: str) -> list[dict[str, Any]]:
-        with self._connect() as conn:
+        with self.connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM evidence WHERE subject_id=? ORDER BY recorded_at",
                 (subject_id,),
