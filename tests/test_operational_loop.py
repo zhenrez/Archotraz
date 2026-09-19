@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from archotraz.artifacts import ArtifactStore
+from archotraz.bindings import BOPO, binding_status
 from archotraz.ledger import Ledger, VersionConflict
 from archotraz.warden import Warden
 
@@ -55,6 +56,15 @@ class OperationalLoopTest(unittest.TestCase):
         self.assertEqual(
             again["guard"]["guard_result_id"], result["guard"]["guard_result_id"]
         )
+
+    def test_recovered_bindings_remain_fail_closed(self) -> None:
+        status = binding_status()
+        self.assertEqual(BOPO.repository, "bopodev/bopo")
+        self.assertEqual(BOPO.provider_type, "shell")
+        self.assertFalse(BOPO.execution_authorized)
+        self.assertFalse(status["untrusted_execution_allowed"])
+        self.assertEqual(status["cell_threshold_policy"], "unresolved")
+        self.assertEqual(len(status["sandbox_core"]), 3)
 
     def test_transition_rejects_stale_expected_version(self) -> None:
         result = self.warden.intake_local(self.repo, request_id="req-002")
