@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 LANGUAGE_BY_SUFFIX = {
@@ -27,12 +27,36 @@ MANIFESTS = {
 }
 
 
-def build_snapshot_manifest(root: str | Path) -> dict[str, Any]:
+def _resolved_exclusions(exclude_paths: Iterable[str | Path]) -> tuple[Path, ...]:
+    return tuple(Path(path).resolve() for path in exclude_paths)
+
+
+def _is_excluded(path: Path, exclusions: tuple[Path, ...]) -> bool:
+    resolved = path.resolve()
+    return any(resolved == excluded or excluded in resolved.parents for excluded in exclusions)
+
+
+def _repository_files(
+    root: Path, *, exclude_paths: Iterable[str | Path] = ()
+) -> list[Path]:
+    exclusions = _resolved_exclusions(exclude_paths)
+    return [
+        path
+        for path in root.rglob("*")
+        if path.is_file()
+        and ".git" not in path.parts
+        and not _is_excluded(path, exclusions)
+    ]
+
+
+def build_snapshot_manifest(
+    root: str | Path, *, exclude_paths: Iterable[str | Path] = ()
+) -> dict[str, Any]:
     root = Path(root).resolve()
     if not root.is_dir():
         raise ValueError(f"not a directory: {root}")
     files: list[dict[str, Any]] = []
-    for path in sorted(p for p in root.rglob("*") if p.is_file() and ".git" not in p.parts):
+    for path in sorted(_repository_files(root, exclude_paths=exclude_paths)):
         rel = path.relative_to(root).as_posix()
         data = path.read_bytes()
         files.append(
@@ -47,12 +71,18 @@ def build_snapshot_manifest(root: str | Path) -> dict[str, Any]:
     }
 
 
-def inspect_repository(root: str | Path) -> list[dict[str, Any]]:
+def inspect_repository(
+    root: str | Path, *, exclude_paths: Iterable[str | Path] = ()
+) -> list[dict[str, Any]]:
     root = Path(root).resolve()
-    paths = [p for p in root.rglob("*") if p.is_file() and ".git" not in p.parts]
+    paths = _repository_files(root, exclude_paths=exclude_paths)
     names = {p.name for p in paths}
     languages = sorted(
-        {LANGUAGE_BY_SUFFIX[p.suffix.lower()] for p in paths if p.suffix.lower() in LANGUAGE_BY_SUFFIX}
+        {
+            LANGUAGE_BY_SUFFIX[p.suffix.lower()]
+            for p in paths
+            if p.suffix.lower() in LANGUAGE_BY_SUFFIX
+        }
     )
     tests = [p for p in paths if "test" in p.name.lower() or "tests" in p.parts]
 
