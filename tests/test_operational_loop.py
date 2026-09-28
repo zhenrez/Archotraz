@@ -323,5 +323,31 @@ class OperationalEvidenceLoopTests(unittest.TestCase):
         self.assertEqual(result["compatibility"], "UNKNOWN")
 
 
+    def test_observed_validation_is_adjudicated_against_bound_thresholds(self) -> None:
+        for idx in range(2):
+            self.ingest(f"manual://observed-{idx}", key=f"observed-ingest-{idx}")
+        self.warden.generate_matches(idempotency_key="observed-match")
+        dossier = self.warden.list_kitchen_dossiers()[0]
+        self.warden.bind_validation_contract(
+            dossier["match_id"],
+            baseline={"command": ["python", "-m", "unittest"]},
+            acceptance_thresholds={"exit_code": 0, "tests_failed": 0},
+            adapter_contract={"kind": "command"},
+            sandbox_binding={"kind": "external", "name": "test-sandbox"},
+            idempotency_key="observed-contract",
+        )
+
+        result = self.warden.record_validation_observation(
+            dossier["match_id"],
+            observed={"exit_code": 0, "tests_failed": 0, "tests_run": 15},
+            idempotency_key="observed-result",
+        )
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["compatibility"], "COMPATIBLE")
+        self.assertFalse(result["executed_by_archotraz"])
+        self.assertEqual(result["failed_thresholds"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
