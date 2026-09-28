@@ -198,6 +198,44 @@ class OperationalEvidenceLoopTests(unittest.TestCase):
             self.assertEqual(projection["automatic_scoring"], "disabled")
             self.assertEqual(projection["automatic_cell_assignment"], "disabled")
 
+
+    def test_feature_comparison_is_unscored_and_preserves_missingness(self) -> None:
+        left = self.warden.ingest_snapshot(
+            source_uri="manual://compare-left",
+            snapshot_bytes=make_repo_zip({
+                "README.md": b"# Left\n",
+                "tests/test_left.py": b"def test_left(): pass\n",
+            }),
+            filename="left.zip",
+            idempotency_key="compare-left",
+        )
+        right = self.warden.ingest_snapshot(
+            source_uri="manual://compare-right",
+            snapshot_bytes=make_repo_zip({"README.md": b"# Right\n"}),
+            filename="right.zip",
+            idempotency_key="compare-right",
+        )
+        with self.warden._conn:  # noqa: SLF001 - bounded missingness fixture
+            self.warden._conn.execute(  # noqa: SLF001
+                "DELETE FROM evidence WHERE candidate_id = ? AND kind = ?",
+                (str(right["candidate_id"]), "performance_verified"),
+            )
+        self.warden.generate_matches(idempotency_key="compare-match")
+        dossier = self.warden.list_kitchen_dossiers()[0]
+        comparison = dossier["feature_comparison"]
+        self.assertEqual(comparison["schema_version"], "archotraz.feature-comparison/v1")
+        self.assertIsNone(comparison["automatic_score"])
+        self.assertEqual(comparison["scoring_status"], "DISABLED")
+        self.assertEqual(comparison["compatibility"], "UNKNOWN")
+        tests_feature = comparison["features"]["tests_present"]
+        self.assertEqual(tests_feature["left_value"], True)
+        self.assertEqual(tests_feature["left_missingness"], "OBSERVED")
+        self.assertEqual(tests_feature["right_value"], False)
+        self.assertEqual(tests_feature["right_missingness"], "OBSERVED")
+        performance = comparison["features"]["performance_verified"]
+        self.assertEqual(performance["left_missingness"], "UNKNOWN")
+        self.assertEqual(performance["right_missingness"], "NOT_RETRIEVED")
+
     def test_kitchen_dossiers_are_proposals_not_claimed_improvements(self) -> None:
         for idx in range(2):
             self.ingest(f"manual://repo-{idx}", key=f"dossier-{idx}", description=f"repo {idx}")
