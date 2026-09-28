@@ -932,6 +932,88 @@ class Warden:
                 )
             return report
 
+    def record_validation_observation(
+        self,
+        match_id: str,
+        *,
+        observed: dict[str, Any],
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Adjudicate externally measured evidence against the bound contract."""
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key is required")
+        if not isinstance(observed, dict) or not observed:
+            raise ValueError("observed must be a non-empty object")
+        request_hash = self._request_hash(
+            "record_validation_observation",
+            {"match_id": match_id, "observed": observed},
+        )
+        with self._lock:
+            prior = self._idempotency_lookup(
+                idempotency_key, "record_validation_observation", request_hash
+            )
+            if prior is not None:
+                return prior
+            contract = self._validation_contract(match_id)
+            if contract is None:
+                raise ValueError("validation contract must be bound before recording observations")
+            thresholds = contract["acceptance_thresholds"]
+            failed = [
+                key
+                for key, expected in thresholds.items()
+                if key not in observed or observed[key] != expected
+            ]
+            passed = not failed
+            report = {
+                "match_id": match_id,
+                "mode": "OBSERVED",
+                "status": "PASS" if passed else "FAIL",
+                "compatibility": "COMPATIBLE" if passed else "INCOMPATIBLE",
+                "executed_by_archotraz": False,
+                "observed": observed,
+                "failed_thresholds": failed,
+                "contract_sha256": self._conn.execute(
+                    "SELECT artifact_sha256 FROM validation_contracts WHERE match_id = ?",
+                    (match_id,),
+                ).fetchone()["artifact_sha256"],
+            }
+            validation_id = self._stable_id(
+                "validation", match_id, "OBSERVED", request_hash
+            )
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO validations(id, match_id, mode, status, report_json, created_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (
+                        validation_id,
+                        match_id,
+                        "OBSERVED",
+                        report["status"],
+                        _canonical_json(report),
+                        _utc_now(),
+                    ),
+                )
+                self._conn.execute(
+                    "UPDATE matches SET compatibility = ? WHERE id = ?",
+                    (report["compatibility"], match_id),
+                )
+                self._record_event(
+                    "validation.observed",
+                    {
+                        "match_id": match_id,
+                        "status": report["status"],
+                        "compatibility": report["compatibility"],
+                        "failed_thresholds": failed,
+                    },
+                )
+                self._idempotency_store(
+                    idempotency_key,
+                    "record_validation_observation",
+                    request_hash,
+                    report,
+                )
+            return report
+
     def list_validations(self, match_id: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
             if match_id is None:
