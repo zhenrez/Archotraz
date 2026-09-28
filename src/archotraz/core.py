@@ -726,11 +726,25 @@ class Warden:
                 "compatibility_assumption": "UNKNOWN_UNTIL_TESTED",
             }
             with self._conn:
-                self._conn.execute("DELETE FROM matches")
+                # Matches are evidence-bearing history once validation references them.
+                # Supersede the prior active set instead of deleting it, then reactivate
+                # stable matches or insert newly derived ones.
+                self._conn.execute(
+                    "UPDATE matches SET status = 'SUPERSEDED' WHERE status = 'PROPOSED'"
+                )
                 for item in generated:
                     self._conn.execute(
                         "INSERT INTO matches(id, left_candidate_id, right_candidate_id, left_snapshot_id, right_snapshot_id, status, compatibility, dossier_path, dossier_sha256, generated_at) "
-                        "VALUES(?,?,?,?,?,'PROPOSED','UNKNOWN',?,?,?)",
+                        "VALUES(?,?,?,?,?,'PROPOSED','UNKNOWN',?,?,?) "
+                        "ON CONFLICT(id) DO UPDATE SET "
+                        "left_candidate_id=excluded.left_candidate_id, "
+                        "right_candidate_id=excluded.right_candidate_id, "
+                        "left_snapshot_id=excluded.left_snapshot_id, "
+                        "right_snapshot_id=excluded.right_snapshot_id, "
+                        "status='PROPOSED', compatibility='UNKNOWN', "
+                        "dossier_path=excluded.dossier_path, "
+                        "dossier_sha256=excluded.dossier_sha256, "
+                        "generated_at=excluded.generated_at",
                         (
                             item["id"],
                             item["left_candidate_id"],
@@ -749,7 +763,7 @@ class Warden:
     def list_kitchen_dossiers(self) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT dossier_path, dossier_sha256 FROM matches ORDER BY id"
+                "SELECT dossier_path, dossier_sha256 FROM matches WHERE status = 'PROPOSED' ORDER BY id"
             ).fetchall()
         dossiers: list[dict[str, Any]] = []
         for row in rows:
