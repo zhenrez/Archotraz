@@ -987,7 +987,7 @@ class Warden:
                     (
                         validation_id,
                         match_id,
-                        "OBSERVED",
+                        f"OBSERVED:{validation_id}",
                         report["status"],
                         _canonical_json(report),
                         _utc_now(),
