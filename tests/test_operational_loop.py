@@ -380,5 +380,45 @@ class OperationalEvidenceLoopTests(unittest.TestCase):
         self.assertEqual(repeated, request)
 
 
+    def test_runner_receipt_must_match_prepared_execution_request(self) -> None:
+        for idx in range(2):
+            self.ingest(f"manual://receipt-{idx}", key=f"receipt-ingest-{idx}")
+        self.warden.generate_matches(idempotency_key="receipt-match")
+        dossier = self.warden.list_kitchen_dossiers()[0]
+        self.warden.bind_validation_contract(
+            dossier["match_id"],
+            baseline={"command": ["python", "-m", "unittest"]},
+            acceptance_thresholds={"exit_code": 0},
+            adapter_contract={"kind": "command"},
+            sandbox_binding={"kind": "external", "name": "test-sandbox"},
+            idempotency_key="receipt-contract",
+        )
+        request = self.warden.prepare_execution_request(
+            dossier["match_id"], idempotency_key="receipt-request"
+        )
+
+        result = self.warden.record_runner_receipt(
+            dossier["match_id"],
+            request_sha256=request["request_sha256"],
+            observed={"exit_code": 0},
+            runner={"name": "test-sandbox", "isolated": True},
+            idempotency_key="receipt-result",
+        )
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["compatibility"], "COMPATIBLE")
+        self.assertTrue(result["executed_by_runner"])
+        self.assertEqual(result["request_sha256"], request["request_sha256"])
+
+        with self.assertRaises(IntegrityFailure):
+            self.warden.record_runner_receipt(
+                dossier["match_id"],
+                request_sha256="0" * 64,
+                observed={"exit_code": 0},
+                runner={"name": "test-sandbox", "isolated": True},
+                idempotency_key="receipt-wrong-request",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
