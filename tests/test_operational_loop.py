@@ -420,5 +420,37 @@ class OperationalEvidenceLoopTests(unittest.TestCase):
             )
 
 
+    def test_work_release_gate_requires_compatible_runner_evidence(self) -> None:
+        for idx in range(2):
+            self.ingest(f"manual://release-{idx}", key=f"release-ingest-{idx}")
+        self.warden.generate_matches(idempotency_key="release-match")
+        dossier = self.warden.list_kitchen_dossiers()[0]
+        blocked = self.warden.work_release_gate(dossier["match_id"])
+        self.assertEqual(blocked["status"], "BLOCKED")
+
+        self.warden.bind_validation_contract(
+            dossier["match_id"],
+            baseline={"command": ["python", "-m", "unittest"]},
+            acceptance_thresholds={"exit_code": 0},
+            adapter_contract={"kind": "command"},
+            sandbox_binding={"kind": "external", "name": "test-sandbox"},
+            idempotency_key="release-contract",
+        )
+        request = self.warden.prepare_execution_request(
+            dossier["match_id"], idempotency_key="release-request"
+        )
+        self.warden.record_runner_receipt(
+            dossier["match_id"],
+            request_sha256=request["request_sha256"],
+            observed={"exit_code": 0},
+            runner={"name": "test-sandbox", "isolated": True},
+            idempotency_key="release-receipt",
+        )
+        ready = self.warden.work_release_gate(dossier["match_id"])
+        self.assertEqual(ready["status"], "ELIGIBLE")
+        self.assertFalse(ready["released"])
+        self.assertEqual(ready["compatibility"], "COMPATIBLE")
+
+
 if __name__ == "__main__":
     unittest.main()
