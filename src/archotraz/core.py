@@ -1190,6 +1190,34 @@ class Warden:
                 )
             return report
 
+    def work_release_gate(self, match_id: str) -> dict[str, Any]:
+        """Report release eligibility without performing release."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT compatibility FROM matches WHERE id = ?", (match_id,)
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"match {match_id!r} not found")
+            receipts = self._conn.execute(
+                "SELECT report_json FROM validations "
+                "WHERE match_id = ? AND mode LIKE 'RUNNER_RECEIPT:%' "
+                "ORDER BY created_at DESC, id DESC",
+                (match_id,),
+            ).fetchall()
+            passing = [
+                json.loads(item["report_json"]) for item in receipts
+                if json.loads(item["report_json"]).get("status") == "PASS"
+            ]
+            eligible = row["compatibility"] == "COMPATIBLE" and bool(passing)
+            return {
+                "match_id": match_id,
+                "status": "ELIGIBLE" if eligible else "BLOCKED",
+                "released": False,
+                "compatibility": row["compatibility"],
+                "passing_runner_receipts": len(passing),
+                "automatic_release": "disabled",
+            }
+
     def list_validations(self, match_id: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
             if match_id is None:
