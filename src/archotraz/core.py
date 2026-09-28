@@ -653,6 +653,24 @@ class Warden:
             "automatic_cell_assignment": "disabled",
         }
 
+    @staticmethod
+    def _feature_comparison(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+        features = {}
+        for kind in FEATURE_PRIMITIVE_KINDS:
+            features[kind] = {
+                "left_value": left["raw_primitives"][kind],
+                "right_value": right["raw_primitives"][kind],
+                "left_missingness": left["missingness"][kind],
+                "right_missingness": right["missingness"][kind],
+            }
+        return {
+            "schema_version": "archotraz.feature-comparison/v1",
+            "features": features,
+            "automatic_score": None,
+            "scoring_status": "DISABLED",
+            "compatibility": "UNKNOWN",
+        }
+
     def generate_matches(self, *, idempotency_key: str) -> dict[str, Any]:
         with self._lock:
             candidates = self.list_candidates()
@@ -706,6 +724,8 @@ class Warden:
                     right2["id"],
                     str(right2["current_snapshot_id"]),
                 )
+                left_projection = self.candidate_feature_projection(left2["id"])
+                right_projection = self.candidate_feature_projection(right2["id"])
                 dossier = {
                     "schema_version": "archotraz.kitchen-dossier/v1",
                     "match_id": match_id,
@@ -719,15 +739,16 @@ class Warden:
                             "candidate_id": left2["id"],
                             "snapshot_id": left2["current_snapshot_id"],
                             "snapshot_sha256": snapshot_digests[str(left2["current_snapshot_id"])],
-                            "feature_projection": self.candidate_feature_projection(left2["id"]),
+                            "feature_projection": left_projection,
                         },
                         {
                             "candidate_id": right2["id"],
                             "snapshot_id": right2["current_snapshot_id"],
                             "snapshot_sha256": snapshot_digests[str(right2["current_snapshot_id"])],
-                            "feature_projection": self.candidate_feature_projection(right2["id"]),
+                            "feature_projection": right_projection,
                         },
                     ],
+                    "feature_comparison": self._feature_comparison(left_projection, right_projection),
                     "unresolved_requirements": [
                         "baseline",
                         "acceptance_thresholds",
