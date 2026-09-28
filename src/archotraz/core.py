@@ -932,6 +932,79 @@ class Warden:
                 )
             return report
 
+    def prepare_execution_request(
+        self, match_id: str, *, idempotency_key: str
+    ) -> dict[str, Any]:
+        """Materialize the exact request an isolated runner must execute.
+
+        This seam intentionally performs no subprocess, network, or candidate-code
+        execution. The bound sandbox adapter consumes the returned request.
+        """
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key is required")
+        request_hash = self._request_hash(
+            "prepare_execution_request", {"match_id": match_id}
+        )
+        with self._lock:
+            prior = self._idempotency_lookup(
+                idempotency_key, "prepare_execution_request", request_hash
+            )
+            if prior is not None:
+                return prior
+            row = self._conn.execute(
+                "SELECT dossier_path, dossier_sha256 FROM matches WHERE id = ? AND status = 'PROPOSED'",
+                (match_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"active match {match_id!r} not found")
+            dossier_payload = self._read_verified_artifact(
+                self.root / row["dossier_path"], row["dossier_sha256"]
+            )
+            dossier = json.loads(dossier_payload.decode("utf-8"))
+            contract = self._validation_contract(match_id)
+            if contract is None:
+                raise ValueError("validation contract must be bound before preparing execution")
+            contract_row = self._conn.execute(
+                "SELECT artifact_sha256 FROM validation_contracts WHERE match_id = ?",
+                (match_id,),
+            ).fetchone()
+            body = {
+                "schema_version": "archotraz.execution-request/v1",
+                "match_id": match_id,
+                "dossier_sha256": row["dossier_sha256"],
+                "contract_sha256": contract_row["artifact_sha256"],
+                "components": dossier["components"],
+                "baseline": contract["baseline"],
+                "acceptance_thresholds": contract["acceptance_thresholds"],
+                "adapter_contract": contract["adapter_contract"],
+                "sandbox_binding": contract["sandbox_binding"],
+                "executed": False,
+            }
+            body_digest = self.sha256(_canonical_json(body).encode("utf-8"))
+            report = {
+                **body,
+                "status": "READY",
+                "request_sha256": body_digest,
+            }
+            artifact_path, artifact_digest = self._store_json_artifact(report)
+            with self._conn:
+                self._record_event(
+                    "validation.execution_prepared",
+                    {
+                        "match_id": match_id,
+                        "request_sha256": body_digest,
+                        "artifact_sha256": artifact_digest,
+                        "executed": False,
+                    },
+                )
+                self._idempotency_store(
+                    idempotency_key,
+                    "prepare_execution_request",
+                    request_hash,
+                    report,
+                )
+            return report
+
     def record_validation_observation(
         self,
         match_id: str,
