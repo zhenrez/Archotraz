@@ -148,6 +148,56 @@ class OperationalEvidenceLoopTests(unittest.TestCase):
         self.assertEqual(report["excluded_pairs"], 3)
         self.assertEqual(report["generated_pairs"] + report["excluded_pairs"], report["declared_pair_universe"])
 
+
+    def test_feature_projection_preserves_observed_false_and_unknown(self) -> None:
+        payload = make_repo_zip({
+            "README.md": b"# Repo\n",
+            "pyproject.toml": b"[project]\nname='feature-proof'\n",
+        })
+        result = self.warden.ingest_snapshot(
+            source_uri="manual://feature-proof",
+            snapshot_bytes=payload,
+            filename="feature-proof.zip",
+            idempotency_key="feature-proof-ingest",
+        )
+        projection = self.warden.candidate_feature_projection(str(result["candidate_id"]))
+        self.assertEqual(projection["schema_version"], "archotraz.feature-projection/v1")
+        self.assertEqual(projection["raw_primitives"]["tests_present"], False)
+        self.assertEqual(projection["missingness"]["tests_present"], "OBSERVED")
+        self.assertIsNone(projection["raw_primitives"]["runtime_verified"])
+        self.assertEqual(projection["missingness"]["runtime_verified"], "UNKNOWN")
+        self.assertEqual(projection["evidence_state"]["runtime_verified"], "unknown")
+        self.assertEqual(projection["automatic_scoring"], "disabled")
+        self.assertEqual(projection["automatic_cell_assignment"], "disabled")
+
+    def test_feature_projection_distinguishes_not_retrieved(self) -> None:
+        result = self.ingest("manual://not-retrieved", key="not-retrieved-ingest")
+        candidate_id = str(result["candidate_id"])
+        with self.warden._conn:  # noqa: SLF001 - bounded evidence-fixture mutation
+            self.warden._conn.execute(  # noqa: SLF001
+                "DELETE FROM evidence WHERE candidate_id = ? AND kind = ?",
+                (candidate_id, "performance_verified"),
+            )
+        projection = self.warden.candidate_feature_projection(candidate_id)
+        self.assertEqual(projection["missingness"]["performance_verified"], "NOT_RETRIEVED")
+        self.assertEqual(projection["evidence_state"]["performance_verified"], "not_retrieved")
+        self.assertEqual(projection["missingness"]["runtime_verified"], "UNKNOWN")
+
+    def test_kitchen_dossiers_include_raw_feature_projections_without_scoring(self) -> None:
+        for idx in range(2):
+            self.ingest(f"manual://feature-pair-{idx}", key=f"feature-pair-{idx}")
+        report = self.warden.generate_matches(idempotency_key="feature-pair-match")
+        self.assertEqual(report["declared_pair_universe"], 1)
+        dossier = self.warden.list_kitchen_dossiers()[0]
+        self.assertEqual(dossier["status"], "PROPOSED_NOT_VALIDATED")
+        self.assertEqual(dossier["compatibility"], "UNKNOWN")
+        for component in dossier["components"]:
+            projection = component["feature_projection"]
+            self.assertEqual(projection["candidate_id"], component["candidate_id"])
+            self.assertEqual(projection["snapshot_sha256"], component["snapshot_sha256"])
+            self.assertEqual(projection["automatic_scoring"], "disabled")
+            self.assertEqual(projection["automatic_cell_assignment"], "disabled")
+
     def test_kitchen_dossiers_are_proposals_not_claimed_improvements(self) -> None:
         for idx in range(2):
             self.ingest(f"manual://repo-{idx}", key=f"dossier-{idx}", description=f"repo {idx}")
