@@ -298,5 +298,30 @@ class OperationalEvidenceLoopTests(unittest.TestCase):
         self.assertEqual(len(self.warden.list_kitchen_dossiers()), 1)
 
 
+    def test_validation_contract_resolves_dry_run_blockers_without_execution(self) -> None:
+        for idx in range(2):
+            self.ingest(f"manual://contract-{idx}", key=f"contract-ingest-{idx}")
+        self.warden.generate_matches(idempotency_key="contract-match")
+        dossier = self.warden.list_kitchen_dossiers()[0]
+
+        contract = self.warden.bind_validation_contract(
+            dossier["match_id"],
+            baseline={"command": ["python", "-m", "unittest"]},
+            acceptance_thresholds={"exit_code": 0},
+            adapter_contract={"kind": "command"},
+            sandbox_binding={"kind": "external", "name": "test-sandbox"},
+            idempotency_key="contract-bind",
+        )
+        self.assertEqual(contract["status"], "BOUND")
+
+        result = self.warden.validate_match_dry_run(
+            dossier["match_id"], idempotency_key="contract-dry-run"
+        )
+        self.assertEqual(result["status"], "READY_FOR_AUTHORIZED_VALIDATION")
+        self.assertEqual(result["unresolved_requirements"], [])
+        self.assertFalse(result["executed"])
+        self.assertEqual(result["compatibility"], "UNKNOWN")
+
+
 if __name__ == "__main__":
     unittest.main()
