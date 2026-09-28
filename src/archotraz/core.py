@@ -136,6 +136,16 @@ class Warden:
             dossier_sha256 TEXT NOT NULL,
             generated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS validations (
+            id TEXT PRIMARY KEY,
+            match_id TEXT NOT NULL REFERENCES matches(id),
+            mode TEXT NOT NULL,
+            status TEXT NOT NULL,
+            report_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(match_id, mode)
+        );
         """
         with self._lock, self._conn:
             self._conn.executescript(schema)
@@ -411,7 +421,7 @@ class Warden:
             return self._read_verified_artifact(path, row["sha256"], expected_size=row["size"])
 
     def count(self, table: str) -> int:
-        allowed = {"candidates", "snapshots", "evidence", "events", "idempotency", "matches"}
+        allowed = {"candidates", "snapshots", "evidence", "events", "idempotency", "matches", "validations"}
         if table not in allowed:
             raise ValueError(f"unsupported table: {table}")
         with self._lock:
@@ -749,6 +759,91 @@ class Warden:
             payload = self._read_verified_artifact(path, row["dossier_sha256"])
             dossiers.append(json.loads(payload.decode("utf-8")))
         return dossiers
+
+    def validate_match_dry_run(self, match_id: str, *, idempotency_key: str) -> dict[str, Any]:
+        """Validate the Kitchen handoff without executing candidate code.
+
+        Dry Mode is the current authority boundary. Missing runtime/scoring
+        contracts remain explicit blockers rather than being guessed or waived.
+        """
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key is required")
+        request_hash = self._request_hash(
+            "validate_match_dry_run",
+            {"match_id": match_id, "mode": "DRY_RUN"},
+        )
+        with self._lock:
+            prior = self._idempotency_lookup(
+                idempotency_key, "validate_match_dry_run", request_hash
+            )
+            if prior is not None:
+                return prior
+
+            row = self._conn.execute(
+                "SELECT dossier_path, dossier_sha256 FROM matches WHERE id = ?",
+                (match_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"match {match_id!r} not found")
+            if not row["dossier_sha256"]:
+                raise IntegrityFailure(f"Kitchen dossier for {match_id!r} has no recorded digest")
+
+            payload = self._read_verified_artifact(
+                self.root / row["dossier_path"], row["dossier_sha256"]
+            )
+            dossier = json.loads(payload.decode("utf-8"))
+            unresolved = list(dossier.get("unresolved_requirements", []))
+            report = {
+                "match_id": match_id,
+                "mode": "DRY_RUN",
+                "status": "BLOCKED" if unresolved else "READY_FOR_AUTHORIZED_VALIDATION",
+                "executed": False,
+                "compatibility": "UNKNOWN",
+                "unresolved_requirements": unresolved,
+            }
+            validation_id = self._stable_id("validation", match_id, "DRY_RUN")
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO validations(id, match_id, mode, status, report_json, created_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (
+                        validation_id,
+                        match_id,
+                        "DRY_RUN",
+                        report["status"],
+                        _canonical_json(report),
+                        _utc_now(),
+                    ),
+                )
+                self._record_event(
+                    "validation.dry_run",
+                    {
+                        "match_id": match_id,
+                        "status": report["status"],
+                        "executed": False,
+                        "unresolved_requirements": unresolved,
+                    },
+                )
+                self._idempotency_store(
+                    idempotency_key,
+                    "validate_match_dry_run",
+                    request_hash,
+                    report,
+                )
+            return report
+
+    def list_validations(self, match_id: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            if match_id is None:
+                rows = self._conn.execute(
+                    "SELECT report_json FROM validations ORDER BY created_at, id"
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT report_json FROM validations WHERE match_id = ? ORDER BY created_at, id",
+                    (match_id,),
+                ).fetchall()
+        return [json.loads(row["report_json"]) for row in rows]
 
     def state_summary(self) -> dict[str, Any]:
         candidates = self.list_candidates()
