@@ -27,6 +27,16 @@ EVIDENCE_STATES = {
     "not_applicable",
 }
 CELLS = {"A", "B", "C", "GEN_POP", "AD_SEG"}
+FEATURE_PRIMITIVE_KINDS = (
+    "file_count",
+    "languages_by_file_count",
+    "manifests",
+    "tests_present",
+    "readme_present",
+    "runtime_verified",
+    "performance_verified",
+    "compatibility_verified",
+)
 
 
 def _utc_now() -> str:
@@ -610,6 +620,39 @@ class Warden:
             ],
         }
 
+    def candidate_feature_projection(self, candidate_id: str) -> dict[str, Any]:
+        """Project raw evidence primitives without scoring or imputing missing data."""
+        dossier = self.get_dossier(candidate_id)
+        evidence_by_kind = {item["kind"]: item for item in dossier["evidence"]}
+        raw_primitives: dict[str, Any] = {}
+        missingness: dict[str, str] = {}
+        evidence_state: dict[str, str] = {}
+        for kind in FEATURE_PRIMITIVE_KINDS:
+            item = evidence_by_kind.get(kind)
+            if item is None:
+                raw_primitives[kind] = None
+                missingness[kind] = "NOT_RETRIEVED"
+                evidence_state[kind] = "not_retrieved"
+            elif item["state"] == "observed":
+                raw_primitives[kind] = item["value"]
+                missingness[kind] = "OBSERVED"
+                evidence_state[kind] = "observed"
+            else:
+                raw_primitives[kind] = None
+                missingness[kind] = "UNKNOWN" if item["state"] == "unknown" else "NOT_RETRIEVED"
+                evidence_state[kind] = item["state"]
+        return {
+            "schema_version": "archotraz.feature-projection/v1",
+            "candidate_id": candidate_id,
+            "snapshot_id": dossier["snapshot"]["id"],
+            "snapshot_sha256": dossier["snapshot"]["sha256"],
+            "raw_primitives": raw_primitives,
+            "missingness": missingness,
+            "evidence_state": evidence_state,
+            "automatic_scoring": "disabled",
+            "automatic_cell_assignment": "disabled",
+        }
+
     def generate_matches(self, *, idempotency_key: str) -> dict[str, Any]:
         with self._lock:
             candidates = self.list_candidates()
@@ -676,11 +719,13 @@ class Warden:
                             "candidate_id": left2["id"],
                             "snapshot_id": left2["current_snapshot_id"],
                             "snapshot_sha256": snapshot_digests[str(left2["current_snapshot_id"])],
+                            "feature_projection": self.candidate_feature_projection(left2["id"]),
                         },
                         {
                             "candidate_id": right2["id"],
                             "snapshot_id": right2["current_snapshot_id"],
                             "snapshot_sha256": snapshot_digests[str(right2["current_snapshot_id"])],
+                            "feature_projection": self.candidate_feature_projection(right2["id"]),
                         },
                     ],
                     "unresolved_requirements": [
