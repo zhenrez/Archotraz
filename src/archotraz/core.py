@@ -146,6 +146,13 @@ class Warden:
             created_at TEXT NOT NULL,
             UNIQUE(match_id, mode)
         );
+
+        CREATE TABLE IF NOT EXISTS validation_contracts (
+            match_id TEXT PRIMARY KEY REFERENCES matches(id),
+            artifact_path TEXT NOT NULL,
+            artifact_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
         """
         with self._lock, self._conn:
             self._conn.executescript(schema)
@@ -774,6 +781,79 @@ class Warden:
             dossiers.append(json.loads(payload.decode("utf-8")))
         return dossiers
 
+    def bind_validation_contract(
+        self,
+        match_id: str,
+        *,
+        baseline: dict[str, Any],
+        acceptance_thresholds: dict[str, Any],
+        adapter_contract: dict[str, Any],
+        sandbox_binding: dict[str, Any],
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Bind caller-supplied validation authority without inventing policy."""
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key is required")
+        contract = {
+            "schema_version": "archotraz.validation-contract/v1",
+            "match_id": match_id,
+            "baseline": baseline,
+            "acceptance_thresholds": acceptance_thresholds,
+            "adapter_contract": adapter_contract,
+            "sandbox_binding": sandbox_binding,
+        }
+        for key in ("baseline", "acceptance_thresholds", "adapter_contract", "sandbox_binding"):
+            if not isinstance(contract[key], dict) or not contract[key]:
+                raise ValueError(f"{key} must be a non-empty object")
+        request_hash = self._request_hash("bind_validation_contract", contract)
+        with self._lock:
+            prior = self._idempotency_lookup(
+                idempotency_key, "bind_validation_contract", request_hash
+            )
+            if prior is not None:
+                return prior
+            exists = self._conn.execute(
+                "SELECT 1 FROM matches WHERE id = ?", (match_id,)
+            ).fetchone()
+            if exists is None:
+                raise NotFound(f"match {match_id!r} not found")
+            path, digest = self._store_json_artifact(contract)
+            report = {
+                "match_id": match_id,
+                "status": "BOUND",
+                "contract_sha256": digest,
+            }
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO validation_contracts(match_id, artifact_path, artifact_sha256, created_at) "
+                    "VALUES(?,?,?,?) "
+                    "ON CONFLICT(match_id) DO UPDATE SET "
+                    "artifact_path=excluded.artifact_path, "
+                    "artifact_sha256=excluded.artifact_sha256, "
+                    "created_at=excluded.created_at",
+                    (match_id, path.relative_to(self.root).as_posix(), digest, _utc_now()),
+                )
+                self._record_event(
+                    "validation.contract_bound",
+                    {"match_id": match_id, "contract_sha256": digest},
+                )
+                self._idempotency_store(
+                    idempotency_key, "bind_validation_contract", request_hash, report
+                )
+            return report
+
+    def _validation_contract(self, match_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT artifact_path, artifact_sha256 FROM validation_contracts WHERE match_id = ?",
+            (match_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        payload = self._read_verified_artifact(
+            self.root / row["artifact_path"], row["artifact_sha256"]
+        )
+        return json.loads(payload.decode("utf-8"))
+
     def validate_match_dry_run(self, match_id: str, *, idempotency_key: str) -> dict[str, Any]:
         """Validate the Kitchen handoff without executing candidate code.
 
@@ -806,7 +886,13 @@ class Warden:
                 self.root / row["dossier_path"], row["dossier_sha256"]
             )
             dossier = json.loads(payload.decode("utf-8"))
-            unresolved = list(dossier.get("unresolved_requirements", []))
+            required = list(dossier.get("unresolved_requirements", []))
+            contract = self._validation_contract(match_id)
+            unresolved = [
+                requirement
+                for requirement in required
+                if contract is None or not contract.get(requirement)
+            ]
             report = {
                 "match_id": match_id,
                 "mode": "DRY_RUN",
