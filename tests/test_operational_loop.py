@@ -349,5 +349,36 @@ class OperationalEvidenceLoopTests(unittest.TestCase):
         self.assertEqual(result["failed_thresholds"], [])
 
 
+    def test_execution_request_is_integrity_bound_and_contains_no_implicit_execution(self) -> None:
+        for idx in range(2):
+            self.ingest(f"manual://execution-{idx}", key=f"execution-ingest-{idx}")
+        self.warden.generate_matches(idempotency_key="execution-match")
+        dossier = self.warden.list_kitchen_dossiers()[0]
+        self.warden.bind_validation_contract(
+            dossier["match_id"],
+            baseline={"command": ["python", "-m", "unittest"]},
+            acceptance_thresholds={"exit_code": 0},
+            adapter_contract={"kind": "command", "timeout_seconds": 30},
+            sandbox_binding={"kind": "external", "name": "test-sandbox"},
+            idempotency_key="execution-contract",
+        )
+
+        request = self.warden.prepare_execution_request(
+            dossier["match_id"], idempotency_key="execution-request"
+        )
+
+        self.assertEqual(request["status"], "READY")
+        self.assertFalse(request["executed"])
+        self.assertEqual(request["sandbox_binding"]["kind"], "external")
+        self.assertEqual(len(request["components"]), 2)
+        self.assertTrue(request["contract_sha256"])
+        self.assertTrue(request["request_sha256"])
+
+        repeated = self.warden.prepare_execution_request(
+            dossier["match_id"], idempotency_key="execution-request"
+        )
+        self.assertEqual(repeated, request)
+
+
 if __name__ == "__main__":
     unittest.main()
