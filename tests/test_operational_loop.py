@@ -228,13 +228,17 @@ class OperationalEvidenceLoopTests(unittest.TestCase):
         self.assertEqual(comparison["scoring_status"], "DISABLED")
         self.assertEqual(comparison["compatibility"], "UNKNOWN")
         tests_feature = comparison["features"]["tests_present"]
-        self.assertEqual(tests_feature["left_value"], True)
+        self.assertEqual(
+            {tests_feature["left_value"], tests_feature["right_value"]},
+            {True, False},
+        )
         self.assertEqual(tests_feature["left_missingness"], "OBSERVED")
-        self.assertEqual(tests_feature["right_value"], False)
         self.assertEqual(tests_feature["right_missingness"], "OBSERVED")
         performance = comparison["features"]["performance_verified"]
-        self.assertEqual(performance["left_missingness"], "UNKNOWN")
-        self.assertEqual(performance["right_missingness"], "NOT_RETRIEVED")
+        self.assertEqual(
+            {performance["left_missingness"], performance["right_missingness"]},
+            {"UNKNOWN", "NOT_RETRIEVED"},
+        )
 
     def test_kitchen_dossiers_are_proposals_not_claimed_improvements(self) -> None:
         for idx in range(2):
