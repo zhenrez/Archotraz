@@ -245,5 +245,39 @@ class OperationalEvidenceLoopTests(unittest.TestCase):
         self.assertIn("unknown", states)
 
 
+    def test_kitchen_dry_run_validation_is_fail_closed_and_durable(self) -> None:
+        for idx in range(2):
+            self.ingest(f"manual://dry-run-{idx}", key=f"dry-run-ingest-{idx}")
+        self.warden.generate_matches(idempotency_key="dry-run-match")
+        dossier = self.warden.list_kitchen_dossiers()[0]
+
+        result = self.warden.validate_match_dry_run(
+            dossier["match_id"],
+            idempotency_key="dry-run-validate",
+        )
+
+        self.assertEqual(result["mode"], "DRY_RUN")
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertFalse(result["executed"])
+        self.assertEqual(result["compatibility"], "UNKNOWN")
+        self.assertIn("baseline", result["unresolved_requirements"])
+        self.assertIn("acceptance_thresholds", result["unresolved_requirements"])
+        self.assertIn("adapter_contract", result["unresolved_requirements"])
+        self.assertIn("sandbox_binding", result["unresolved_requirements"])
+
+        repeated = self.warden.validate_match_dry_run(
+            dossier["match_id"],
+            idempotency_key="dry-run-validate",
+        )
+        self.assertEqual(repeated, result)
+        self.assertEqual(self.warden.count("validations"), 1)
+
+        self.warden.close()
+        self.warden = Warden(self.root)
+        persisted = self.warden.list_validations(dossier["match_id"])
+        self.assertEqual(len(persisted), 1)
+        self.assertEqual(persisted[0], result)
+
+
 if __name__ == "__main__":
     unittest.main()
