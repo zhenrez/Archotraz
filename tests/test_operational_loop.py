@@ -279,5 +279,24 @@ class OperationalEvidenceLoopTests(unittest.TestCase):
         self.assertEqual(persisted[0], result)
 
 
+    def test_match_regeneration_preserves_validation_history(self) -> None:
+        for idx in range(2):
+            self.ingest(f"manual://regen-{idx}", key=f"regen-ingest-{idx}")
+        self.warden.generate_matches(idempotency_key="regen-match-1")
+        dossier = self.warden.list_kitchen_dossiers()[0]
+        validation = self.warden.validate_match_dry_run(
+            dossier["match_id"], idempotency_key="regen-validation"
+        )
+
+        regenerated = self.warden.generate_matches(idempotency_key="regen-match-2")
+
+        self.assertEqual(regenerated["generated_pairs"], 1)
+        self.assertEqual(
+            self.warden.list_validations(dossier["match_id"]),
+            [validation],
+        )
+        self.assertEqual(len(self.warden.list_kitchen_dossiers()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
