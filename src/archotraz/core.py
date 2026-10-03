@@ -1055,6 +1055,14 @@ class Warden:
             contract = self._validation_contract(match_id)
             if contract is None:
                 raise IntegrityFailure("validation contract is missing")
+            sandbox_binding = contract["sandbox_binding"]
+            expected_runner = sandbox_binding.get("name")
+            if runner.get("isolated") is not True:
+                raise IntegrityFailure("runner receipt must attest isolated execution")
+            if expected_runner and runner.get("name") != expected_runner:
+                raise IntegrityFailure(
+                    "runner receipt identity does not match the bound sandbox"
+                )
             thresholds = contract["acceptance_thresholds"]
             failed = [
                 key for key, expected in thresholds.items()
