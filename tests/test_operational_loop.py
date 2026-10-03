@@ -420,6 +420,42 @@ class OperationalEvidenceLoopTests(unittest.TestCase):
             )
 
 
+    def test_runner_receipt_must_attest_bound_isolated_runner(self) -> None:
+        for idx in range(2):
+            self.ingest(f"manual://attest-{idx}", key=f"attest-ingest-{idx}")
+        self.warden.generate_matches(idempotency_key="attest-match")
+        dossier = self.warden.list_kitchen_dossiers()[0]
+        self.warden.bind_validation_contract(
+            dossier["match_id"],
+            baseline={"command": ["python", "-m", "unittest"]},
+            acceptance_thresholds={"exit_code": 0},
+            adapter_contract={"kind": "command"},
+            sandbox_binding={"kind": "external", "name": "trusted-sandbox"},
+            idempotency_key="attest-contract",
+        )
+        request = self.warden.prepare_execution_request(
+            dossier["match_id"], idempotency_key="attest-request"
+        )
+
+        with self.assertRaises(IntegrityFailure):
+            self.warden.record_runner_receipt(
+                dossier["match_id"],
+                request_sha256=request["request_sha256"],
+                observed={"exit_code": 0},
+                runner={"name": "other-sandbox", "isolated": True},
+                idempotency_key="attest-wrong-runner",
+            )
+
+        with self.assertRaises(IntegrityFailure):
+            self.warden.record_runner_receipt(
+                dossier["match_id"],
+                request_sha256=request["request_sha256"],
+                observed={"exit_code": 0},
+                runner={"name": "trusted-sandbox", "isolated": False},
+                idempotency_key="attest-not-isolated",
+            )
+
+
     def test_work_release_gate_requires_compatible_runner_evidence(self) -> None:
         for idx in range(2):
             self.ingest(f"manual://release-{idx}", key=f"release-ingest-{idx}")
